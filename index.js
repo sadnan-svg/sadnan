@@ -236,30 +236,62 @@ async function conversationsMenu() {
 
 // ── Opportunities ─────────────────────────────────────────────────────────────
 
+function buildStageMap(pipelines) {
+  const map = {};
+  for (const p of pipelines) {
+    for (const s of p.stages ?? []) map[s.id] = `${p.name} › ${s.name}`;
+  }
+  return map;
+}
+
+function fmtOpp(o, stageMap) {
+  return {
+    ...o,
+    contact:      o.contact?.name ?? o.contactId ?? dim('—'),
+    stage:        stageMap[o.pipelineStageId] ?? dim(o.pipelineStageId ?? '—'),
+    monetaryValue: o.monetaryValue ? `$${o.monetaryValue.toLocaleString()}` : dim('$0 — not set'),
+    effectiveProbability: o.effectiveProbability != null ? `${o.effectiveProbability}%` : dim('—'),
+    customFields: (o.customFields ?? []).map(f => f.fieldValueString ?? f.fieldValue ?? '').filter(Boolean).join(', ') || dim('—'),
+    source:       o.source ?? dim('—'),
+    tags:         o.relations?.[0]?.tags?.join(', ') ?? dim('—'),
+    attributionSource: o.attributions?.[0]?.utmSource ?? dim('—'),
+    attributionCampaign: o.attributions?.[0]?.utmCampaign ?? dim('—'),
+    createdAt:    o.createdAt ? new Date(o.createdAt).toLocaleString() : dim('—'),
+    updatedAt:    o.updatedAt ? new Date(o.updatedAt).toLocaleString() : dim('—'),
+    lastStageChangeAt: o.lastStageChangeAt ? new Date(o.lastStageChangeAt).toLocaleString() : dim('—'),
+  };
+}
+
 async function opportunitiesMenu() {
   const { action } = await inquirer.prompt({
     type: 'list', name: 'action', message: 'Opportunities',
-    choices: ['Search / List', 'Create', 'Update Status', 'Delete', 'View Pipelines', chalk.dim('← Back')],
+    choices: ['Search / List', 'Create', 'Update', 'Delete', 'View Pipelines', chalk.dim('← Back')],
   });
 
   if (action === chalk.dim('← Back')) return;
 
   if (action === 'Search / List') {
     const { q } = await inquirer.prompt({ type: 'input', name: 'q', message: 'Search query (blank = all):' });
-    const opps = await api.searchOpportunities(q, 25);
+    const [opps, pipelines] = await Promise.all([
+      api.searchOpportunities(q, 25),
+      api.getPipelines(),
+    ]);
     if (!opps.length) { console.log(dim('\n  (no results)\n')); return; }
+    const stageMap = buildStageMap(pipelines);
 
     printTable(
-      ['#', 'Name', 'Status', 'Value', 'Contact', 'Assigned To', 'Close Date', 'ID'],
+      ['#', 'Name', 'Status', 'Value', 'Contact', 'Stage', 'Prob%', 'Source', 'ID'],
       opps.map((o, i) => [
         String(i + 1),
         truncate(o.name ?? '', 24),
         o.status === 'won'  ? ok(o.status) :
-        o.status === 'lost' ? err(o.status) : o.status ?? '',
-        o.monetaryValue != null ? `$${o.monetaryValue}` : dim('—'),
+        o.status === 'lost' ? err(o.status) :
+        o.status === 'abandoned' ? dim(o.status) : o.status ?? '',
+        o.monetaryValue ? ok(`$${o.monetaryValue.toLocaleString()}`) : err('$0'),
         truncate(o.contact?.name ?? o.contactId ?? '', 20),
-        truncate(o.assignedTo ?? '', 18),
-        o.closeDate ? new Date(o.closeDate).toLocaleDateString() : dim('—'),
+        truncate(stageMap[o.pipelineStageId] ?? '', 22),
+        o.effectiveProbability != null ? `${o.effectiveProbability}%` : dim('—'),
+        truncate(o.source ?? '', 18),
         dim(o.id),
       ])
     );
@@ -268,7 +300,7 @@ async function opportunitiesMenu() {
       o => `${o.name ?? 'Untitled'}` + dim(` — ${o.status ?? ''} — $${o.monetaryValue ?? 0}`),
       'View full details for:'
     );
-    if (opp) printDetail(opp, opp.name ?? 'Opportunity');
+    if (opp) printDetail(fmtOpp(opp, stageMap), opp.name ?? 'Opportunity');
   }
 
   if (action === 'Create') {
@@ -291,40 +323,91 @@ async function opportunitiesMenu() {
       { type: 'list',  name: 'status',        message: 'Status:', choices: ['open', 'won', 'lost', 'abandoned'] },
     ]);
     const opp = await api.createOpportunity({
-      ...answers,
-      pipelineId,
-      pipelineStageId,
+      ...answers, pipelineId, pipelineStageId,
       monetaryValue: Number(answers.monetaryValue) || 0,
     });
     console.log(ok(`\n  ✓ Created opportunity: ${opp.id}\n`));
-    printDetail(opp, opp.name ?? 'New Opportunity');
+    const stageMap = buildStageMap(pipelines);
+    printDetail(fmtOpp(opp, stageMap), opp.name ?? 'New Opportunity');
   }
 
-  if (action === 'Update Status') {
+  if (action === 'Update') {
     const { q } = await inquirer.prompt({ type: 'input', name: 'q', message: 'Search opportunities:' });
-    const opps = await api.searchOpportunities(q, 25);
+    const [opps, pipelines] = await Promise.all([
+      api.searchOpportunities(q, 25),
+      api.getPipelines(),
+    ]);
     if (!opps.length) { console.log(dim('\n  (no results)\n')); return; }
+    const stageMap = buildStageMap(pipelines);
     const opp = await pickFromList(opps,
-      o => `${o.name ?? 'Untitled'}` + dim(` [${o.status}]`),
-      'Select opportunity:'
+      o => `${o.name ?? 'Untitled'}` + dim(` — ${o.status} — $${o.monetaryValue ?? 0}`),
+      'Select opportunity to update:'
     );
     if (!opp) return;
-    const { status } = await inquirer.prompt({ type: 'list', name: 'status', message: 'New status:', choices: ['open', 'won', 'lost', 'abandoned'] });
-    const updated = await api.updateOpportunityStatus(opp.id, status);
-    console.log(ok(`\n  ✓ Status updated to "${status}"\n`));
-    printDetail(updated, opp.name ?? 'Opportunity');
+    printDetail(fmtOpp(opp, stageMap), `Current: ${opp.name}`);
+
+    const { field } = await inquirer.prompt({
+      type: 'list', name: 'field', message: 'What to update?',
+      choices: ['Status', 'Monetary Value', 'Name', 'Stage', 'Close Date', chalk.dim('← Back')],
+    });
+    if (field === chalk.dim('← Back')) return;
+
+    if (field === 'Status') {
+      const { status } = await inquirer.prompt({ type: 'list', name: 'status', message: 'New status:', choices: ['open', 'won', 'lost', 'abandoned'] });
+      const updated = await api.updateOpportunity(opp.id, { status });
+      console.log(ok(`\n  ✓ Status → "${status}"\n`));
+      if (updated) printDetail(fmtOpp(updated, stageMap), opp.name ?? 'Opportunity');
+    }
+
+    if (field === 'Monetary Value') {
+      const { val } = await inquirer.prompt({ type: 'input', name: 'val', message: 'New value ($):', default: String(opp.monetaryValue ?? 0) });
+      const updated = await api.updateOpportunity(opp.id, { monetaryValue: Number(val) || 0 });
+      console.log(ok(`\n  ✓ Value → $${Number(val).toLocaleString()}\n`));
+      if (updated) printDetail(fmtOpp(updated, stageMap), opp.name ?? 'Opportunity');
+    }
+
+    if (field === 'Name') {
+      const { name } = await inquirer.prompt({ type: 'input', name: 'name', message: 'New name:', default: opp.name });
+      const updated = await api.updateOpportunity(opp.id, { name });
+      console.log(ok(`\n  ✓ Name updated\n`));
+      if (updated) printDetail(fmtOpp(updated, stageMap), updated?.name ?? 'Opportunity');
+    }
+
+    if (field === 'Stage') {
+      const pipeline = pipelines.find(p => p.id === opp.pipelineId);
+      const stages = pipeline?.stages ?? [];
+      if (!stages.length) { console.log(err('  No stages in this pipeline.\n')); return; }
+      const { pipelineStageId } = await inquirer.prompt({
+        type: 'list', name: 'pipelineStageId', message: 'New stage:',
+        choices: stages.map(s => ({ name: s.name, value: s.id })),
+      });
+      const updated = await api.updateOpportunity(opp.id, { pipelineStageId });
+      console.log(ok(`\n  ✓ Stage updated\n`));
+      if (updated) printDetail(fmtOpp(updated, stageMap), opp.name ?? 'Opportunity');
+    }
+
+    if (field === 'Close Date') {
+      const { closeDate } = await inquirer.prompt({ type: 'input', name: 'closeDate', message: 'Close date (YYYY-MM-DD):', default: opp.closeDate?.slice(0, 10) ?? '' });
+      const updated = await api.updateOpportunity(opp.id, { closeDate });
+      console.log(ok(`\n  ✓ Close date updated\n`));
+      if (updated) printDetail(fmtOpp(updated, stageMap), opp.name ?? 'Opportunity');
+    }
   }
 
   if (action === 'Delete') {
     const { q } = await inquirer.prompt({ type: 'input', name: 'q', message: 'Search opportunities:' });
-    const opps = await api.searchOpportunities(q, 25);
+    const [opps, pipelines] = await Promise.all([
+      api.searchOpportunities(q, 25),
+      api.getPipelines(),
+    ]);
     if (!opps.length) { console.log(dim('\n  (no results)\n')); return; }
+    const stageMap = buildStageMap(pipelines);
     const opp = await pickFromList(opps,
       o => `${o.name ?? 'Untitled'}` + dim(` — ${o.status} — $${o.monetaryValue ?? 0}`),
       'Select to delete:'
     );
     if (!opp) return;
-    printDetail(opp, 'Opportunity to Delete');
+    printDetail(fmtOpp(opp, stageMap), 'Opportunity to Delete');
     const { confirm } = await inquirer.prompt({ type: 'confirm', name: 'confirm', message: err('Delete this opportunity?'), default: false });
     if (confirm) { await api.deleteOpportunity(opp.id); console.log(ok('  ✓ Deleted\n')); }
     else console.log(dim('  Cancelled\n'));

@@ -79,9 +79,13 @@ export async function createOpportunity(fields) {
   return data.opportunity;
 }
 
-export async function updateOpportunityStatus(id, status) {
-  const { data } = await client.patch(`/opportunities/${id}`, { status });
+export async function updateOpportunity(id, fields) {
+  const { data } = await client.patch(`/opportunities/${id}`, fields);
   return data.opportunity;
+}
+
+export async function updateOpportunityStatus(id, status) {
+  return updateOpportunity(id, { status });
 }
 
 export async function deleteOpportunity(id) {
