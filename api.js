@@ -80,7 +80,7 @@ export async function createOpportunity(fields) {
 }
 
 export async function updateOpportunity(id, fields) {
-  const { data } = await client.patch(`/opportunities/${id}`, fields);
+  const { data } = await client.put(`/opportunities/${id}`, fields);
   return data.opportunity;
 }
 
